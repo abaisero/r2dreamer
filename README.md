@@ -25,6 +25,21 @@ Monitoring results:
 tensorboard --logdir ./logdir
 ```
 
+The same metrics are also mirrored to [Weights & Biases](https://wandb.ai), which is
+on by default and requires a one-time `wandb login`.  To opt out:
+```bash
+WANDB_MODE=offline python3 train.py   # log locally, sync later with `wandb sync`
+WANDB_MODE=disabled python3 train.py  # skip wandb entirely
+```
+
+wandb is configured entirely through [its own environment
+variables](https://docs.wandb.ai/guides/track/environment-variables/) — there are no
+wandb keys in the Hydra config:
+```bash
+WANDB_PROJECT=r2dreamer WANDB_RUN_GROUP=ablation WANDB_TAGS=dmc,vision \
+    python3 train.py
+```
+
 Switching algorithms:
 
 ```bash

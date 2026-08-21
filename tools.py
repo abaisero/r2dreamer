@@ -7,6 +7,7 @@ import time
 
 import numpy as np
 import torch
+import wandb
 from torch import nn
 from torch.nn import init as nn_init
 from torch.utils.tensorboard import SummaryWriter
@@ -158,6 +159,10 @@ class Logger:
         self._logdir = logdir
         self._filename = filename
         self._writer = SummaryWriter(log_dir=str(logdir), max_queue=1000)
+        # In disabled mode wandb.run is still set, so check .disabled too: building
+        # the payload encodes videos through moviepy, which is wasted if nothing
+        # consumes it.
+        self._wandb = wandb.run is not None and not wandb.run.disabled
         self._last_step = None
         self._last_time = None
         self._scalars = {}
@@ -184,27 +189,40 @@ class Logger:
         print(f"[{step}]", " / ".join(f"{k} {v:.1f}" for k, v in scalars))
         with (self._logdir / self._filename).open("a") as f:
             f.write(json.dumps({"step": step, **dict(scalars)}) + "\n")
+        payload = {}
         for name, value in scalars:
             if "/" not in name:
-                self._writer.add_scalar("scalars/" + name, value, step)
-            else:
-                self._writer.add_scalar(name, value, step)
+                name = "scalars/" + name
+            self._writer.add_scalar(name, value, step)
+            payload[name] = value
         for name, value in self._images.items():
+            # add_image defaults to CHW; wandb.Image wants HWC.
             self._writer.add_image(name, value, step)
+            payload[name] = wandb.Image(value.transpose(1, 2, 0))
         for name, value in self._videos.items():
             name = name if isinstance(name, str) else name.decode("utf-8")
             if np.issubdtype(value.dtype, np.floating):
                 value = np.clip(255 * value, 0, 255).astype(np.uint8)
             B, T, H, W, C = value.shape
+            # Tile the batch horizontally into a single strip.
             value = value.transpose(1, 4, 2, 0, 3).reshape((1, T, C, H, B * W))
             self._writer.add_video(name, value, step, 16)
+            payload[name] = wandb.Video(value[0], fps=16)
         for name, value in self._histograms.items():
             self._writer.add_histogram(name, value, step)
+            payload[name] = wandb.Histogram(value)
 
         self._writer.flush()
+        if self._wandb:
+            # Log ``step`` as data rather than as wandb's own counter: callers
+            # write out-of-order steps (trainer offsets by env index), which
+            # wandb would silently drop.  train.py makes it the chart x-axis.
+            payload["step"] = step
+            wandb.log(payload)
         self._scalars = {}
         self._images = {}
         self._videos = {}
+        self._histograms = {}
 
     def _compute_fps(self, step):
         if self._last_step is None:
