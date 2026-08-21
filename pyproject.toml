@@ -46,3 +46,6 @@ override-dependencies = [
     "torch==2.8.0",
     "pywin32==306; sys_platform == 'win32'",
 ]
+
+[tool.uv.extra-build-dependencies]
+flatdict = ["setuptools<81"]
