@@ -130,3 +130,6 @@ dmypy.json
 # IDE
 .vscode
 .clinerules
+
+# gifs pulled from wandb by `just mk-dmc-gifs`
+media/
