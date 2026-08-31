@@ -19,7 +19,7 @@ import tools
 from a2c import A2C
 from buffer import Buffer
 from causal_a2c import CausalA2C
-from distributions import sample_exogenous_noise
+from distributions import sample_exogenous_noise, uniform_to_gumbel
 from networks import Projector
 from optim import LaProp, clip_grad_agc_
 from tools import to_f32
@@ -31,6 +31,7 @@ class Dreamer(nn.Module):
         self.device = torch.device(config.device)
         self.kl_free = float(config.kl_free)
         self.imag_horizon = int(config.imag_horizon)
+        self.exogenous_noise = str(config.exogenous_noise)
         self.act_dim = act_space.n if hasattr(act_space, "n") else sum(act_space.shape)
         self.rep_loss = str(config.rep_loss)
 
@@ -417,7 +418,7 @@ class Dreamer(nn.Module):
     @torch.no_grad()
     def _imagine(
         self, start: tuple[Tensor, Tensor], imag_horizon: int, actor: networks.MLPHead
-    ) -> tuple[Tensor, Tensor, TensorDict]:
+    ) -> tuple[Tensor, Tensor, Tensor]:
         """Roll out the policy in latent space."""
         # (B, S, K), (B, D)
         feats = []
@@ -426,7 +427,12 @@ class Dreamer(nn.Module):
         # Exogenous transition noise, drawn before the rollout so it carries no
         # dependence on any action the actor picks.
         # (B, T_imag, S, K)
-        noise = sample_exogenous_noise((stoch.shape[0], imag_horizon, *stoch.shape[1:]), stoch.device)
+        noise = sample_exogenous_noise(
+            (stoch.shape[0], imag_horizon, *stoch.shape[1:]), stoch.device, self.exogenous_noise
+        )
+        # The transition always consumes the Gumbel parameterization, whichever
+        # one the rollout hands on to the critic.
+        gumbel = noise if self.exogenous_noise == "g" else uniform_to_gumbel(noise)
         for i in range(imag_horizon):
             # (B, F)
             feat = self._frozen_rssm.get_feat(stoch, deter)
@@ -435,7 +441,7 @@ class Dreamer(nn.Module):
             # Append feat and its corresponding sampled action at the same time step.
             feats.append(feat)
             actions.append(action)
-            stoch, deter = self._frozen_rssm.img_step(stoch, deter, action, noise["g"][:, i])
+            stoch, deter = self._frozen_rssm.img_step(stoch, deter, action, gumbel[:, i])
 
         # Stack along sequence dim T_imag.  noise[:, i] produced feats[i + 1]; the last
         # step's result is discarded, so its noise indexes nothing and is dropped.

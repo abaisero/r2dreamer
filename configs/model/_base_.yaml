@@ -8,6 +8,7 @@ log_grads: False
 device: ${device}
 rep_loss: "r2dreamer" # r2dreamer/dreamer/infonce/dreamerpro
 rl: "a2c" # a2c/causal-a2c
+exogenous_noise: "g" # u/g -- parameterization the causal baseline conditions on
 
 lr: 4e-5
 agc: 0.3

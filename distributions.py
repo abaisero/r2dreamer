@@ -1,5 +1,5 @@
 import torch
-from tensordict import TensorDict
+from torch import Tensor
 from torch import distributions as torchd
 from torch.nn import functional as F
 
@@ -14,16 +14,26 @@ def symexp(x):
     return torch.sign(x) * torch.expm1(torch.abs(x))
 
 
-def sample_exogenous_noise(shape, device, dtype=torch.float32):
-    """Exogenous noise of an RSSM transition, in both parameterizations.
+EXOGENOUS_NOISE_KINDS = ("u", "g")
+
+
+def uniform_to_gumbel(u: Tensor) -> Tensor:
+    """The Gumbel(0, 1) draw behind the uniform draw "u"."""
+    return -torch.log(-torch.log(u))
+
+
+def sample_exogenous_noise(shape, device, kind: str = "g", dtype=torch.float32) -> Tensor:
+    """Exogenous noise of an RSSM transition, in one of two parameterizations.
 
     "g" is what gets added to the logits; "u" is the uniform draw it came from.
     "u" is the primitive because g = -log(-log(u)) is exact, while the reverse
     u = exp(-exp(-g)) saturates to 0.0 or 1.0 in float32.
     """
+    if kind not in EXOGENOUS_NOISE_KINDS:
+        raise ValueError(f"Invalid exogenous noise kind {kind=}")
     # clamped away from 0 so the double log stays finite
     u = torch.rand(shape, device=device, dtype=dtype).clamp_(min=1e-20)
-    return TensorDict({"u": u, "g": -torch.log(-torch.log(u))}, batch_size=shape)
+    return u if kind == "u" else uniform_to_gumbel(u)
 
 
 class OneHotDist(torchd.one_hot_categorical.OneHotCategorical):

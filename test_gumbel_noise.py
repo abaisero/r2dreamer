@@ -2,37 +2,54 @@
 
 import math
 
+import pytest
 import torch
 
 import rssm
-from distributions import OneHotDist, sample_exogenous_noise
+from distributions import OneHotDist, sample_exogenous_noise, uniform_to_gumbel
 
 
-def test_sample_exogenous_noise():
-    noise = sample_exogenous_noise((4, 6, 3, 5), torch.device("cpu"))
-    assert noise.batch_size == torch.Size([4, 6, 3, 5])
-    assert noise["u"].shape == noise["g"].shape == (4, 6, 3, 5)
-    assert not noise["u"].requires_grad and not noise["g"].requires_grad
+@pytest.mark.parametrize("kind", ["u", "g"])
+def test_sample_exogenous_noise_is_one_tensor(kind):
+    noise = sample_exogenous_noise((4, 6, 3, 5), torch.device("cpu"), kind)
+    assert isinstance(noise, torch.Tensor)
+    assert noise.shape == (4, 6, 3, 5)
+    assert not noise.requires_grad
 
     # indexing the rollout depends on
-    assert noise["g"][:, 2].shape == (4, 3, 5)
-    assert noise[:, :-1].batch_size == torch.Size([4, 5, 3, 5])
+    assert noise[:, 2].shape == (4, 3, 5)
+    assert noise[:, :-1].shape == (4, 5, 3, 5)
 
-    # g is exactly the Gumbel transform of u
-    assert torch.equal(noise["g"], -torch.log(-torch.log(noise["u"])))
 
-    # u is the primitive: the round trip back through g recovers it
-    big = sample_exogenous_noise((200_000,), torch.device("cpu"))
-    assert torch.allclose(torch.exp(-torch.exp(-big["g"])), big["u"], atol=1e-6)
+def test_sample_exogenous_noise_rejects_unknown_kind():
+    with pytest.raises(ValueError):
+        sample_exogenous_noise((2,), torch.device("cpu"), "gumbel")
 
-    # and g really is Gumbel(0, 1)
-    assert abs(big["g"].mean().item() - 0.5772156649) < 0.01
-    assert abs(big["g"].var().item() - math.pi**2 / 6) < 0.05
+
+def test_u_is_uniform_and_g_is_gumbel():
+    torch.manual_seed(0)
+    u = sample_exogenous_noise((200_000,), torch.device("cpu"), "u")
+    assert 0.0 < u.min().item() and u.max().item() < 1.0
+    assert abs(u.mean().item() - 0.5) < 0.01
+    assert abs(u.var().item() - 1 / 12) < 0.01
+
+    g = sample_exogenous_noise((200_000,), torch.device("cpu"), "g")
+    assert abs(g.mean().item() - 0.5772156649) < 0.01
+    assert abs(g.var().item() - math.pi**2 / 6) < 0.05
+
+
+def test_uniform_to_gumbel_matches_the_sampler():
+    # same seed, so both calls draw the same underlying uniforms
+    torch.manual_seed(0)
+    u = sample_exogenous_noise((4, 6), torch.device("cpu"), "u")
+    torch.manual_seed(0)
+    g = sample_exogenous_noise((4, 6), torch.device("cpu"), "g")
+    assert torch.equal(g, uniform_to_gumbel(u))
 
 
 def test_rsample_with_noise():
     logits = torch.randn(4, 3, 5, requires_grad=True)
-    g = sample_exogenous_noise((4, 3, 5), torch.device("cpu"))["g"]
+    g = sample_exogenous_noise((4, 3, 5), torch.device("cpu"), "g")
 
     # given the noise, sampling is deterministic
     s = OneHotDist(logits).rsample(noise=g)
@@ -68,7 +85,7 @@ def test_img_step_is_determined_by_the_noise():
     model = rssm.RSSM(config, embed_size=8, act_dim=3)
     stoch, deter = model.initial(2)
     action = torch.zeros(2, 3)
-    g = sample_exogenous_noise((2, 4, 5), torch.device("cpu"))["g"]
+    g = sample_exogenous_noise((2, 4, 5), torch.device("cpu"), "g")
 
     # same noise, same action -> same next state
     a = model.img_step(stoch, deter, action, g)
@@ -82,7 +99,11 @@ def test_img_step_is_determined_by_the_noise():
 
 
 if __name__ == "__main__":
-    test_sample_exogenous_noise()
+    test_sample_exogenous_noise_is_one_tensor("u")
+    test_sample_exogenous_noise_is_one_tensor("g")
+    test_sample_exogenous_noise_rejects_unknown_kind()
+    test_u_is_uniform_and_g_is_gumbel()
+    test_uniform_to_gumbel_matches_the_sampler()
     test_rsample_with_noise()
     test_img_step_is_determined_by_the_noise()
     print("ok")

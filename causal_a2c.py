@@ -48,12 +48,12 @@ class CausalBaseline(nn.Module):
         self.rnn = nn.GRU(noise_size, int(config.rnn_units), batch_first=True)
         self.head = networks.MLPHead(config, feat_size + int(config.rnn_units))
 
-    def forward(self, feat: Tensor, noise_g: Tensor):
+    def forward(self, feat: Tensor, noise: Tensor):
         breakpoint()
-        # feat: (B, T_imag, F), noise_g: (B, T_imag-1, S, K) aligned to feat[:, 1:]
+        # feat: (B, T_imag, F), noise: (B, T_imag-1, S, K) aligned to feat[:, 1:]
         B, T, _ = feat.shape
         # reversed so the GRU consumes the sequence from the end backwards
-        h, _ = self.rnn(noise_g.reshape(B, T - 1, -1).flip(1))
+        h, _ = self.rnn(noise.reshape(B, T - 1, -1).flip(1))
         # h[:, j] summarizes draws T-2-j .. T-2; unflipping puts the summary of
         # draws t .. T-2 at index t.  The last step's window is empty, which the
         # GRU's zero initial state already stands for.
@@ -181,7 +181,7 @@ class CausalA2C(nn.Module):
         imag_actions: Tensor,
         imag_rewards: Tensor,
         imag_continuation: Tensor,
-        imag_noise: TensorDict,
+        imag_noise: Tensor,
         losses: dict[str, Tensor],
         metrics: dict[str, Tensor | float],
     ):
@@ -193,7 +193,7 @@ class CausalA2C(nn.Module):
         """
         # data: dict of (B, T, *), feat: (B, T, F)
         # imag_*: (B*T, T_imag, *), already detached by the caller
-        # imag_noise["u"], imag_noise["g"]: (B*T, T_imag-1, S, K), the exogenous
+        # imag_noise: (B*T, T_imag-1, S, K), the exogenous draws of the rollout
         B, T, _ = feat.shape
 
         imag_values = self.frozen_value(imag_feat).mode()
@@ -212,7 +212,7 @@ class CausalA2C(nn.Module):
             is_last, imag_termination, imag_rewards, imag_values, imag_values
         )
         # (B*T, T_imag-1, 1)
-        imag_baselines = self.frozen_causal_baseline(imag_feat, imag_noise["g"]).mode()
+        imag_baselines = self.frozen_causal_baseline(imag_feat, imag_noise).mode()
         # (B*T, T_imag, 1)
         imag_baselines = imag_baselines[:, :-1]
         # (B*T, T_imag-1, 1)
@@ -252,11 +252,9 @@ class CausalA2C(nn.Module):
             weights * (cross_entropy_returns + cross_entropy_imag_slow_values)
         )
 
-        imag_baseline_dist = self.causal_baseline(imag_feat, imag_noise["g"])
+        imag_baseline_dist = self.causal_baseline(imag_feat, imag_noise)
         # (B*T, T_imag, 1)
-        imag_slow_baselines = self.frozen_slow_causal_baseline(
-            imag_feat, imag_noise["g"]
-        ).mode()
+        imag_slow_baselines = self.frozen_slow_causal_baseline(imag_feat, imag_noise).mode()
         # (B*T, T_imag, 1)
         cross_entropy_returns = -imag_baseline_dist.log_prob(
             returns_padded.detach()
