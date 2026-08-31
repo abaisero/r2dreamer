@@ -31,7 +31,6 @@ class Dreamer(nn.Module):
         self.device = torch.device(config.device)
         self.kl_free = float(config.kl_free)
         self.imag_horizon = int(config.imag_horizon)
-        self.exogenous_noise = str(config.exogenous_noise)
         self.act_dim = act_space.n if hasattr(act_space, "n") else sum(act_space.shape)
         self.rep_loss = str(config.rep_loss)
 
@@ -397,7 +396,12 @@ class Dreamer(nn.Module):
             post_deter.reshape(-1, *post_deter.shape[2:]).detach(),
         )
         # (B, T, ...) -> (B*T, ...)
-        imag_feat, imag_action, imag_noise = self._imagine(start, self.imag_horizon + 1, self.rl.frozen_actor)
+        # Only the causal baseline conditions on the noise, so it alone picks the
+        # parameterization; plain A2C ignores whatever the rollout hands it.
+        noise_kind = getattr(self.rl, "exogenous_noise", "g")
+        imag_feat, imag_action, imag_noise = self._imagine(
+            start, self.imag_horizon + 1, self.rl.frozen_actor, noise_kind
+        )
         imag_feat, imag_action = imag_feat.detach(), imag_action.detach()
 
         # (B*T, T_imag, 1)
@@ -417,7 +421,11 @@ class Dreamer(nn.Module):
 
     @torch.no_grad()
     def _imagine(
-        self, start: tuple[Tensor, Tensor], imag_horizon: int, actor: networks.MLPHead
+        self,
+        start: tuple[Tensor, Tensor],
+        imag_horizon: int,
+        actor: networks.MLPHead,
+        noise_kind: str = "g",
     ) -> tuple[Tensor, Tensor, Tensor]:
         """Roll out the policy in latent space."""
         # (B, S, K), (B, D)
@@ -428,11 +436,11 @@ class Dreamer(nn.Module):
         # dependence on any action the actor picks.
         # (B, T_imag, S, K)
         noise = sample_exogenous_noise(
-            (stoch.shape[0], imag_horizon, *stoch.shape[1:]), stoch.device, self.exogenous_noise
+            (stoch.shape[0], imag_horizon, *stoch.shape[1:]), stoch.device, noise_kind
         )
         # The transition always consumes the Gumbel parameterization, whichever
         # one the rollout hands on to the critic.
-        gumbel = noise if self.exogenous_noise == "g" else uniform_to_gumbel(noise)
+        gumbel = noise if noise_kind == "g" else uniform_to_gumbel(noise)
         for i in range(imag_horizon):
             # (B, F)
             feat = self._frozen_rssm.get_feat(stoch, deter)

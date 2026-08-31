@@ -125,7 +125,7 @@ class A2C(nn.Module):
         imag_action: Tensor,
         imag_reward: Tensor,
         imag_cont: Tensor,
-        imag_noise: TensorDict,  # unused: plain A2C has no use for the exogenous noise
+        imag_noise: Tensor,  # unused: plain A2C has no use for the exogenous noise
         losses: dict[str, Tensor],
         metrics: dict[str, Tensor | float],
     ):

@@ -106,6 +106,9 @@ class CausalA2C(nn.Module):
         self._slow_value = _frozen_copy(self.value)
         self._slow_value_updates = 0
 
+        # Only this critic conditions on the exogenous noise, so it alone picks
+        # which parameterization the imagination rollout should hand it.
+        self.exogenous_noise = str(config.causal_baseline.exogenous_noise)
         self.causal_baseline = CausalBaseline(
             config.causal_baseline, feat_size, noise_size
         )
