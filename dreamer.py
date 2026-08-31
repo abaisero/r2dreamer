@@ -19,6 +19,7 @@ import tools
 from a2c import A2C
 from buffer import Buffer
 from causal_a2c import CausalA2C
+from distributions import sample_exogenous_noise
 from networks import Projector
 from optim import LaProp, clip_grad_agc_
 from tools import to_f32
@@ -49,7 +50,7 @@ class Dreamer(nn.Module):
         if config.rl == "a2c":
             self.rl = A2C(config, self.rssm.feat_size, act_space)
         elif config.rl == "causal-a2c":
-            self.rl = CausalA2C(config, self.rssm.feat_size, act_space)
+            self.rl = CausalA2C(config, self.rssm.feat_size, act_space, self.rssm.flat_stoch)
         else:
             raise ValueError(f"Invalid RL method {config.rl=}")
 
@@ -395,7 +396,7 @@ class Dreamer(nn.Module):
             post_deter.reshape(-1, *post_deter.shape[2:]).detach(),
         )
         # (B, T, ...) -> (B*T, ...)
-        imag_feat, imag_action = self._imagine(start, self.imag_horizon + 1, self.rl.frozen_actor)
+        imag_feat, imag_action, imag_noise = self._imagine(start, self.imag_horizon + 1, self.rl.frozen_actor)
         imag_feat, imag_action = imag_feat.detach(), imag_action.detach()
 
         # (B*T, T_imag, 1)
@@ -404,7 +405,7 @@ class Dreamer(nn.Module):
         imag_cont = self._frozen_cont(imag_feat).mean
 
         # === Actor-critic learning on the simulated rollout ===
-        self.rl.losses(data, feat, imag_feat, imag_action, imag_reward, imag_cont, losses, metrics)
+        self.rl.losses(data, feat, imag_feat, imag_action, imag_reward, imag_cont, imag_noise, losses, metrics)
 
         total_loss = sum([v * self._loss_scales[k] for k, v in losses.items()])
         self._scaler.scale(total_loss).backward()
@@ -416,13 +417,17 @@ class Dreamer(nn.Module):
     @torch.no_grad()
     def _imagine(
         self, start: tuple[Tensor, Tensor], imag_horizon: int, actor: networks.MLPHead
-    ) -> tuple[Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, TensorDict]:
         """Roll out the policy in latent space."""
         # (B, S, K), (B, D)
         feats = []
         actions = []
         stoch, deter = start
-        for _ in range(imag_horizon):
+        # Exogenous transition noise, drawn before the rollout so it carries no
+        # dependence on any action the actor picks.
+        # (B, T_imag, S, K)
+        noise = sample_exogenous_noise((stoch.shape[0], imag_horizon, *stoch.shape[1:]), stoch.device)
+        for i in range(imag_horizon):
             # (B, F)
             feat = self._frozen_rssm.get_feat(stoch, deter)
             # (B, A)
@@ -430,11 +435,12 @@ class Dreamer(nn.Module):
             # Append feat and its corresponding sampled action at the same time step.
             feats.append(feat)
             actions.append(action)
-            stoch, deter = self._frozen_rssm.img_step(stoch, deter, action)
+            stoch, deter = self._frozen_rssm.img_step(stoch, deter, action, noise["g"][:, i])
 
-        # Stack along sequence dim T_imag.
-        # (B, T_imag, F), (B, T_imag, A)
-        return torch.stack(feats, dim=1), torch.stack(actions, dim=1)
+        # Stack along sequence dim T_imag.  noise[:, i] produced feats[i + 1]; the last
+        # step's result is discarded, so its noise indexes nothing and is dropped.
+        # (B, T_imag, F), (B, T_imag, A), (B, T_imag-1, S, K)
+        return torch.stack(feats, dim=1), torch.stack(actions, dim=1), noise[:, :-1]
 
     @torch.no_grad()
     def preprocess(self, data: TensorDict) -> TensorDict:

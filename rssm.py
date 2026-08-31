@@ -177,21 +177,27 @@ class RSSM(nn.Module):
         stoch = self.get_dist(logit).rsample()
         return stoch, deter, logit
 
-    def img_step(self, stoch, deter, prev_action):
-        """Single prior step (no observation)."""
+    def img_step(self, stoch, deter, prev_action, noise=None):
+        """Single prior step (no observation).
+
+        "noise" is the exogenous Gumbel noise of the transition.  When None it is
+        drawn inside rsample and discarded.
+        """
 
         # (B, D)
         deter = self._deter_net(stoch, deter, prev_action)
         # (B, S, K)
-        stoch, _ = self.prior(deter)
+        stoch, _ = self.prior(deter, noise)
         return stoch, deter
 
-    def prior(self, deter):
+    def prior(self, deter, noise=None):
         """Compute prior distribution parameters and sample stoch."""
 
         # (B, S, K)
         logit = self._img_net(deter)
-        stoch = self.get_dist(logit).rsample()
+        # .base_dist because Independent.rsample does not forward keyword arguments;
+        # the wrapper only changes how log_prob/entropy reduce, not sampling.
+        stoch = self.get_dist(logit).base_dist.rsample(noise=noise)
         return stoch, logit
 
     def imagine_with_action(self, stoch, deter, actions):

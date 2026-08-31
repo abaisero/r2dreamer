@@ -1,4 +1,5 @@
 import torch
+from tensordict import TensorDict
 from torch import distributions as torchd
 from torch.nn import functional as F
 
@@ -11,6 +12,18 @@ def symlog(x):
 
 def symexp(x):
     return torch.sign(x) * torch.expm1(torch.abs(x))
+
+
+def sample_exogenous_noise(shape, device, dtype=torch.float32):
+    """Exogenous noise of an RSSM transition, in both parameterizations.
+
+    "g" is what gets added to the logits; "u" is the uniform draw it came from.
+    "u" is the primitive because g = -log(-log(u)) is exact, while the reverse
+    u = exp(-exp(-g)) saturates to 0.0 or 1.0 in float32.
+    """
+    # clamped away from 0 so the double log stays finite
+    u = torch.rand(shape, device=device, dtype=dtype).clamp_(min=1e-20)
+    return TensorDict({"u": u, "g": -torch.log(-torch.log(u))}, batch_size=shape)
 
 
 class OneHotDist(torchd.one_hot_categorical.OneHotCategorical):
@@ -28,9 +41,14 @@ class OneHotDist(torchd.one_hot_categorical.OneHotCategorical):
         _mode = F.one_hot(torch.argmax(self.logits, axis=-1), self.logits.shape[-1])
         return _mode.detach() + self.logits - self.logits.detach()
 
-    def rsample(self, sample_shape=(), temperature=1.0):
+    def rsample(self, sample_shape=(), temperature=1.0, noise=None):
         # (..., K)
-        return F.gumbel_softmax(self.logits, tau=temperature, hard=True, dim=-1)
+        if noise is None:
+            noise = -torch.empty_like(self.logits).exponential_().log()  # ~Gumbel(0, 1)
+        y_soft = F.softmax((self.logits + noise) / temperature, dim=-1)
+        y_hard = F.one_hot(y_soft.argmax(-1), y_soft.shape[-1]).to(y_soft)
+        # straight-through, identical to F.gumbel_softmax(..., hard=True)
+        return y_hard - y_soft.detach() + y_soft
 
     def sample(self, **kwargs):
         raise NotImplementedError

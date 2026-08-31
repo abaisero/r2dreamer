@@ -29,6 +29,7 @@ loss_scales:
   rep: 0.1
   policy: 1.0
   value: 1.0
+  causal_baseline: 1.0
   repval: 0.3
   swav: 1.0
   temp: 1.0
@@ -180,3 +181,18 @@ critic:
   outscale: 0.0
   symlog_inputs: False
   name: 'value'
+
+causal_baseline:
+  shape: [255,]
+  rnn_units: ${model.units}
+  layers: 3
+  units: ${model.units}
+  act: ${model.act}
+  norm: ${model.norm}
+  device: ${device}
+  dist:
+    name: 'symexp_twohot'
+    bin_num: 255
+  outscale: 0.0
+  symlog_inputs: False
+  name: 'causal_baseline'

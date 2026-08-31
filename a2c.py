@@ -125,6 +125,7 @@ class A2C(nn.Module):
         imag_action: Tensor,
         imag_reward: Tensor,
         imag_cont: Tensor,
+        imag_noise: TensorDict,  # unused: plain A2C has no use for the exogenous noise
         losses: dict[str, Tensor],
         metrics: dict[str, Tensor | float],
     ):
@@ -146,12 +147,12 @@ class A2C(nn.Module):
         weight = torch.cumprod(imag_cont * disc, dim=1)
         last = torch.zeros_like(imag_cont)
         term = 1 - imag_cont
-        ret = self.lambda_return(
+        returns = self.lambda_return(
             last, term, imag_reward, imag_value, imag_value, disc, self.lamb
         )  # (B*T, T_imag-1, 1)
-        ret_offset, ret_scale = self.return_ema(ret)
+        returns_offset, returns_scale = self.return_ema(returns)
         # (B*T, T_imag-1, 1)
-        adv = (ret - imag_value[:, :-1]) / ret_scale
+        adv = (returns - imag_value[:, :-1]) / returns_scale
 
         policy = self.actor(imag_feat)
         # (B*T, T_imag-1, 1)
@@ -161,7 +162,7 @@ class A2C(nn.Module):
 
         imag_value_dist = self.value(imag_feat)
         # (B*T, T_imag, 1)
-        tar_padded = torch.cat([ret, 0 * ret[:, -1:]], 1)
+        tar_padded = torch.cat([returns, 0 * returns[:, -1:]], 1)
         losses["value"] = torch.mean(
             weight[:, :-1].detach()
             * (-imag_value_dist.log_prob(tar_padded.detach()) - imag_value_dist.log_prob(imag_slow_value.detach()))[
@@ -169,8 +170,8 @@ class A2C(nn.Module):
             ].unsqueeze(-1)
         )
         # log
-        ret_normed = (ret - ret_offset) / ret_scale
-        metrics["ret"] = torch.mean(ret_normed)
+        returns_normalized = (returns - returns_offset) / returns_scale
+        metrics["ret"] = torch.mean(returns_normalized)
         metrics["ret_005"] = self.return_ema.ema_vals[0]
         metrics["ret_095"] = self.return_ema.ema_vals[1]
         metrics["adv"] = torch.mean(adv)
@@ -178,7 +179,7 @@ class A2C(nn.Module):
         metrics["con"] = torch.mean(imag_cont)
         metrics["rew"] = torch.mean(imag_reward)
         metrics["val"] = torch.mean(imag_value)
-        metrics["tar"] = torch.mean(ret)
+        metrics["tar"] = torch.mean(returns)
         metrics["slowval"] = torch.mean(imag_slow_value)
         metrics["weight"] = torch.mean(weight)
         metrics["action_entropy"] = torch.mean(entropy)
@@ -190,23 +191,23 @@ class A2C(nn.Module):
             to_f32(data["is_terminal"]),
             to_f32(data["reward"]),
         )
-        boot = ret[:, 0].reshape(B, T, 1)
+        boot = returns[:, 0].reshape(B, T, 1)
         value = self.frozen_value(feat).mode()
         slow_value = self.frozen_slow_value(feat).mode()
         disc = 1 - 1 / self.horizon
         weight = 1.0 - last
-        ret = self.lambda_return(last, term, reward, value, boot, disc, self.lamb)
-        ret_padded = torch.cat([ret, 0 * ret[:, -1:]], 1)
+        returns = self.lambda_return(last, term, reward, value, boot, disc, self.lamb)
+        returns_padded = torch.cat([returns, 0 * returns[:, -1:]], 1)
 
         # Keep this attached to the world model so gradients can flow through
         value_dist = self.value(feat)
         losses["repval"] = torch.mean(
             weight[:, :-1]
-            * (-value_dist.log_prob(ret_padded.detach()) - value_dist.log_prob(slow_value.detach()))[:, :-1].unsqueeze(
+            * (-value_dist.log_prob(returns_padded.detach()) - value_dist.log_prob(slow_value.detach()))[:, :-1].unsqueeze(
                 -1
             )
         )
         # log
-        metrics.update(tools.tensorstats(ret, "ret_replay"))
+        metrics.update(tools.tensorstats(returns, "ret_replay"))
         metrics.update(tools.tensorstats(value, "value_replay"))
         metrics.update(tools.tensorstats(slow_value, "slow_value_replay"))
